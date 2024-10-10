@@ -1,15 +1,10 @@
 package com.github.wolray.seq;
 
-import java.io.BufferedWriter;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 /**
  * @author wolray
@@ -20,8 +15,8 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return (Seq<T>)Empty.emptySeq;
     }
 
-    static <T> Seq<T> flat(Seq<Optional<T>> seq) {
-        return c -> seq.consume(o -> o.ifPresent(c));
+    static <T> Seq<T> flat(Seq<Optional<T>> optionalSeq) {
+        return c -> optionalSeq.consume(o -> o.ifPresent(c));
     }
 
     @SafeVarargs
@@ -99,13 +94,7 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
     }
 
     static <T> Seq<T> of(Iterable<T> iterable) {
-        if (iterable instanceof ItrSeq) {
-            return (ItrSeq<T>)iterable;
-        }
-        if (iterable instanceof Collection) {
-            return new BackedSeq<>((Collection<T>)iterable);
-        }
-        return (ItrSeq<T>)iterable::iterator;
+        return iterable instanceof ItrSeq ? (ItrSeq<T>)iterable : (ItrSeq<T>)iterable::iterator;
     }
 
     static <K, V> SeqMap<K, V> of(Map<K, V> map) {
@@ -118,11 +107,11 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
 
     @SafeVarargs
     static <T> Seq<T> of(T... ts) {
-        return new BackedSeq<>(Arrays.asList(ts));
+        return of(Arrays.asList(ts));
     }
 
     static Seq<Object> ofJson(Object node) {
-        return ofTree(node, n -> c -> {
+        return Seq.ofTree(node, n -> c -> {
             if (n instanceof Iterable) {
                 ((Iterable<?>)n).forEach(c);
             } else if (n instanceof Map) {
@@ -131,12 +120,12 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         });
     }
 
-    static <N> Seq<N> ofTree(int maxDepth, N node, Function<N, Seq<N>> sub) {
-        return ((SeqExpand<N>)sub::apply).toSeq(node, maxDepth);
+    static <N> Seq<N> ofTree(N node, Function<N, Seq<N>> sub) {
+        return SeqExpand.of(sub).toSeq(node);
     }
 
-    static <N> Seq<N> ofTree(N node, Function<N, Seq<N>> sub) {
-        return ((SeqExpand<N>)sub::apply).toSeq(node);
+    static <N> Seq<N> ofTree(int maxDepth, N node, Function<N, Seq<N>> sub) {
+        return SeqExpand.of(sub).toSeq(node, maxDepth);
     }
 
     static <T> ItrSeq<T> repeat(int n, T t) {
@@ -319,7 +308,11 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
     }
 
     default Seq<T> distinct() {
-        return toSet();
+        return c -> reduce(new HashSet<>(), (set, t) -> {
+            if (set.add(t)) {
+                c.accept(t);
+            }
+        });
     }
 
     default <E> Seq<T> distinctBy(Function<T, E> function) {
@@ -372,16 +365,16 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         });
     }
 
-    default Seq<T> filter(int n, Predicate<T> predicate) {
-        return predicate == null ? this : c -> consume(c, n, t -> {
+    default Seq<T> filter(Predicate<T> predicate) {
+        return predicate == null ? this : c -> consume(t -> {
             if (predicate.test(t)) {
                 c.accept(t);
             }
         });
     }
 
-    default Seq<T> filter(Predicate<T> predicate) {
-        return predicate == null ? this : c -> consume(t -> {
+    default Seq<T> filter(int n, Predicate<T> predicate) {
+        return predicate == null ? this : c -> consume(c, n, t -> {
             if (predicate.test(t)) {
                 c.accept(t);
             }
@@ -514,15 +507,15 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
     }
 
     default <K> SeqMap<K, T> groupBy(Function<T, K> toKey, BinaryOperator<T> operator) {
-        return groupBy(toKey, Reducer.fold(operator));
-    }
-
-    default <K, E> SeqMap<K, ArraySeq<E>> groupBy(Function<T, K> toKey, Function<T, E> toValue) {
-        return groupBy(toKey, Reducer.mapping(toValue));
+        return groupBy(toKey, Transducer.of(operator));
     }
 
     default <K, V> SeqMap<K, V> groupBy(Function<T, K> toKey, Reducer<T, V> reducer) {
         return reduce(Reducer.groupBy(toKey, reducer));
+    }
+
+    default <K, E> SeqMap<K, ArraySeq<E>> groupBy(Function<T, K> toKey, Function<T, E> toValue) {
+        return groupBy(toKey, Reducer.mapping(toValue));
     }
 
     default <K, V, E> SeqMap<K, E> groupBy(Function<T, K> toKey, Transducer<T, V, E> transducer) {
@@ -625,26 +618,12 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         });
     }
 
-    default <V> Seq<V> mapSub(Predicate<T> first, Predicate<T> last, Reducer<T, V> reducer) {
-        Supplier<V> supplier = reducer.supplier();
-        BiConsumer<V, T> accumulator = reducer.accumulator();
-        return c -> fold((V)null, (v, t) -> {
-            if (v == null && first.test(t)) {
-                v = supplier.get();
-                accumulator.accept(v, t);
-            } else if (v != null) {
-                accumulator.accept(v, t);
-                if (last.test(t)) {
-                    c.accept(v);
-                    return null;
-                }
-            }
-            return v;
-        });
-    }
-
     default Seq<ArraySeq<T>> mapSub(Predicate<T> takeWhile) {
         return mapSub(takeWhile, Reducer.toList());
+    }
+
+    default Seq<ArraySeq<T>> mapSub(T first, T last) {
+        return mapSub(first, last, Reducer.toList());
     }
 
     default <V> Seq<V> mapSub(Predicate<T> takeWhile, Reducer<T, V> reducer) {
@@ -671,8 +650,22 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         };
     }
 
-    default Seq<ArraySeq<T>> mapSub(T first, T last) {
-        return mapSub(first, last, Reducer.toList());
+    default <V> Seq<V> mapSub(Predicate<T> first, Predicate<T> last, Reducer<T, V> reducer) {
+        Supplier<V> supplier = reducer.supplier();
+        BiConsumer<V, T> accumulator = reducer.accumulator();
+        return c -> fold((V)null, (v, t) -> {
+            if (v == null && first.test(t)) {
+                v = supplier.get();
+                accumulator.accept(v, t);
+            } else if (v != null) {
+                accumulator.accept(v, t);
+                if (last.test(t)) {
+                    c.accept(v);
+                    return null;
+                }
+            }
+            return v;
+        });
     }
 
     default <V> Seq<V> mapSub(T first, T last, Reducer<T, V> reducer) {
@@ -748,6 +741,22 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         });
     }
 
+    default Seq<T> parallel() {
+        return parallel(Async.common());
+    }
+
+    default Seq<T> parallel(Async async) {
+        return c -> async.joinAll(map(t -> () -> c.accept(t)));
+    }
+
+    default Seq<T> parallelNoJoin() {
+        return parallelNoJoin(Async.common());
+    }
+
+    default Seq<T> parallelNoJoin(Async async) {
+        return c -> consume(t -> async.submit(() -> c.accept(t)));
+    }
+
     default Seq<T> partial(int n, Consumer<T> substitute) {
         return c -> consume(c, n, substitute);
     }
@@ -765,12 +774,7 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
     }
 
     default T reduce(BinaryOperator<T> binaryOperator) {
-        return reduce(Reducer.fold(binaryOperator));
-    }
-
-    default <E> E reduce(E des, BiConsumer<E, T> accumulator) {
-        consume(t -> accumulator.accept(des, t));
-        return des;
+        return reduce(Transducer.of(binaryOperator));
     }
 
     default <E> E reduce(Reducer<T, E> reducer) {
@@ -784,12 +788,17 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return des;
     }
 
-    default <E, V> E reduce(Reducer<T, V> reducer, Function<V, E> transformer) {
-        return transformer.apply(reduce(reducer));
-    }
-
     default <E, V> E reduce(Transducer<T, V, E> transducer) {
         return transducer.transformer().apply(reduce(transducer.reducer()));
+    }
+
+    default <E> E reduce(E des, BiConsumer<E, T> accumulator) {
+        consume(t -> accumulator.accept(des, t));
+        return des;
+    }
+
+    default <E, V> E reduce(Reducer<T, V> reducer, Function<V, E> transformer) {
+        return transformer.apply(reduce(reducer));
     }
 
     default Seq<T> replace(int n, UnaryOperator<T> operator) {
@@ -806,6 +815,14 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
             c.accept(e);
             return e;
         });
+    }
+
+    default Seq<T> shareIn(int buffer, Async async) {
+        return async.toShared(buffer, false, this);
+    }
+
+    default Seq<T> shareIn(int buffer, boolean delay, Async async) {
+        return async.toShared(buffer, delay, this);
     }
 
     default int sizeOrDefault() {
@@ -832,14 +849,6 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
             .map(p -> p.first);
     }
 
-    default ArraySeq<T> sorted() {
-        return sortWith(null);
-    }
-
-    default ArraySeq<T> sortedDesc() {
-        return sortWith(Collections.reverseOrder());
-    }
-
     default ArraySeq<T> sortWith(Comparator<T> comparator) {
         ArraySeq<T> list = toList();
         list.sort(comparator);
@@ -848,6 +857,18 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
 
     default ArraySeq<T> sortWithDesc(Comparator<T> comparator) {
         return sortWith(comparator.reversed());
+    }
+
+    default ArraySeq<T> sorted() {
+        return sortWith(null);
+    }
+
+    default ArraySeq<T> sortedDesc() {
+        return sortWith(Collections.reverseOrder());
+    }
+
+    default Seq<T> stateIn(boolean delay, Async async) {
+        return async.toState(delay, this);
     }
 
     default double sum(ToDoubleFunction<T> function) {
@@ -874,6 +895,16 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         };
     }
 
+    default Seq<T> takeWhile(Predicate<T> predicate) {
+        return c -> consumeTillStop(t -> {
+            if (predicate.test(t)) {
+                c.accept(t);
+            } else {
+                stop();
+            }
+        });
+    }
+
     default Seq<T> takeWhile(BiPredicate<T, T> testPrevCurr) {
         return takeWhile(t -> t, testPrevCurr);
     }
@@ -891,16 +922,6 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
                 }
             });
         };
-    }
-
-    default Seq<T> takeWhile(Predicate<T> predicate) {
-        return c -> consumeTillStop(t -> {
-            if (predicate.test(t)) {
-                c.accept(t);
-            } else {
-                stop();
-            }
-        });
     }
 
     default Seq<T> takeWhileEquals() {
@@ -966,21 +987,6 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return reduce(new ConcurrentSeq<>(), ConcurrentSeq::add);
     }
 
-    default void toFile(FileWriter fileWriter, Function<T, String> formatter) {
-        try (BufferedWriter bufferedWriter = new BufferedWriter(fileWriter)) {
-            consume(s -> {
-                try {
-                    bufferedWriter.write(formatter.apply(s));
-                    bufferedWriter.newLine();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            });
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-    }
-
     default <E> Lazy<E> toLazy(Reducer<T, E> reducer) {
         return Lazy.of(() -> reduce(reducer));
     }
@@ -1011,26 +1017,6 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
 
     default SeqSet<T> toSet() {
         return reduce(Reducer.toSet(sizeOrDefault()));
-    }
-
-    default Stream<T> toStream() {
-        Iterator<T> iterator = new Iterator<T>() {
-            @Override
-            public boolean hasNext() {
-                throw new NoSuchElementException();
-            }
-
-            @Override
-            public T next() {
-                throw new NoSuchElementException();
-            }
-
-            @Override
-            public void forEachRemaining(Consumer<? super T> action) {
-                consume(action::accept);
-            }
-        };
-        return ItrUtil.toStream(iterator);
     }
 
     default <A, B, D> Seq3<A, B, D> triple(BiConsumer<Consumer3<A, B, D>, T> consumer) {
@@ -1088,8 +1074,35 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return windowedByTime(timeMillis, Reducer.toList());
     }
 
+    default <V> Seq<V> windowedByTime(long timeMillis, Reducer<T, V> reducer) {
+        if (timeMillis <= 0) {
+            throw new IllegalArgumentException("non-positive time");
+        }
+        return c -> {
+            Supplier<V> supplier = reducer.supplier();
+            BiConsumer<V, T> accumulator = reducer.accumulator();
+            Consumer<V> finisher = reducer.finisher();
+            reduce(new LongPair<>(System.currentTimeMillis(), supplier.get()), (p, t) -> {
+                long now = System.currentTimeMillis();
+                if (now - p.longVal > timeMillis) {
+                    p.longVal = now;
+                    if (finisher != null) {
+                        finisher.accept(p.it);
+                    }
+                    c.accept(p.it);
+                    p.it = supplier.get();
+                }
+                accumulator.accept(p.it, t);
+            });
+        };
+    }
+
     default Seq<ArraySeq<T>> windowedByTime(long timeMillis, long stepMillis) {
         return windowedByTime(timeMillis, stepMillis, Reducer.toList());
+    }
+
+    default <V, E> Seq<E> windowedByTime(long timeMillis, Transducer<T, V, E> transducer) {
+        return windowedByTime(timeMillis, transducer.reducer()).map(transducer.transformer());
     }
 
     default <V> Seq<V> windowedByTime(long timeMillis, long stepMillis, Reducer<T, V> reducer) {
@@ -1128,33 +1141,6 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return windowedByTime(timeMillis, stepMillis, transducer.reducer()).map(transducer.transformer());
     }
 
-    default <V> Seq<V> windowedByTime(long timeMillis, Reducer<T, V> reducer) {
-        if (timeMillis <= 0) {
-            throw new IllegalArgumentException("non-positive time");
-        }
-        return c -> {
-            Supplier<V> supplier = reducer.supplier();
-            BiConsumer<V, T> accumulator = reducer.accumulator();
-            Consumer<V> finisher = reducer.finisher();
-            reduce(new LongPair<>(System.currentTimeMillis(), supplier.get()), (p, t) -> {
-                long now = System.currentTimeMillis();
-                if (now - p.longVal > timeMillis) {
-                    p.longVal = now;
-                    if (finisher != null) {
-                        finisher.accept(p.it);
-                    }
-                    c.accept(p.it);
-                    p.it = supplier.get();
-                }
-                accumulator.accept(p.it, t);
-            });
-        };
-    }
-
-    default <V, E> Seq<E> windowedByTime(long timeMillis, Transducer<T, V, E> transducer) {
-        return windowedByTime(timeMillis, transducer.reducer()).map(transducer.transformer());
-    }
-
     default Seq<IntPair<T>> withInt(ToIntFunction<T> function) {
         return map(t -> new IntPair<>(function.applyAsInt(t), t));
     }
@@ -1175,23 +1161,23 @@ public interface Seq<T> extends Seq0<Consumer<T>> {
         return c -> consumeIndexed((i, t) -> c.accept(new IntPair<>(i, t)));
     }
 
+    default <E> Seq2<T, E> zip(Iterable<E> iterable) {
+        return c -> zip(iterable, c);
+    }
+
     default <B, C> Seq3<T, B, C> zip(Iterable<B> bs, Iterable<C> cs) {
         return c -> zip(bs, cs, c);
+    }
+
+    default <E> void zip(Iterable<E> iterable, BiConsumer<T, E> consumer) {
+        Iterator<E> iterator = iterable.iterator();
+        consumeTillStop(t -> consumer.accept(t, ItrUtil.pop(iterator)));
     }
 
     default <B, C> void zip(Iterable<B> bs, Iterable<C> cs, Consumer3<T, B, C> consumer) {
         Iterator<B> bi = bs.iterator();
         Iterator<C> ci = cs.iterator();
         consumeTillStop(t -> consumer.accept(t, ItrUtil.pop(bi), ItrUtil.pop(ci)));
-    }
-
-    default <E> Seq2<T, E> zip(Iterable<E> iterable) {
-        return c -> zip(iterable, c);
-    }
-
-    default <E> void zip(Iterable<E> iterable, BiConsumer<T, E> consumer) {
-        Iterator<E> iterator = iterable.iterator();
-        consumeTillStop(t -> consumer.accept(t, ItrUtil.pop(iterator)));
     }
 
     interface IntObjToInt<T> {

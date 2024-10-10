@@ -2,15 +2,19 @@ package com.github.wolray.seq;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
-import java.util.function.UnaryOperator;
 
 /**
  * @author wolray
  */
 public interface SeqExpand<T> extends Function<T, Seq<T>> {
+    static <T> SeqExpand<T> of(Function<T, Seq<T>> function) {
+        return function instanceof SeqExpand ? (SeqExpand<T>)function : function::apply;
+    }
+
     default SeqExpand<T> filter(Predicate<T> predicate) {
         return t -> apply(t).filter(predicate);
     }
@@ -19,8 +23,10 @@ public interface SeqExpand<T> extends Function<T, Seq<T>> {
         return t -> apply(t).filter(predicate.negate());
     }
 
-    default SeqExpand<T> mapping(UnaryOperator<Seq<T>> operator) {
-        return t -> operator.apply(apply(t));
+    default void scan(BiConsumer<T, ArraySeq<T>> c, T node) {
+        ArraySeq<T> sub = apply(node).filterNotNull().toList();
+        c.accept(node, sub);
+        sub.consume(n -> scan(c, n));
     }
 
     default void scan(Consumer<T> c, T node) {
@@ -43,26 +49,20 @@ public interface SeqExpand<T> extends Function<T, Seq<T>> {
         }
     }
 
-    default void scan(Map<T, ArraySeq<T>> map, T node) {
-        if (map.containsKey(node)) {
-            return;
-        }
-        ArraySeq<T> sub = apply(node).filterNotNull().toList();
-        map.put(node, sub);
-        sub.forEach(n -> scan(map, n));
-    }
-
     default SeqExpand<T> terminate(Predicate<T> predicate) {
         return t -> predicate.test(t) ? Seq.empty() : apply(t);
     }
 
-    default Map<T, ArraySeq<T>> toDAG(Seq<T> nodes) {
-        return nodes.reduce(new HashMap<>(), this::scan);
-    }
-
     default Map<T, ArraySeq<T>> toDAG(T node) {
         Map<T, ArraySeq<T>> map = new HashMap<>();
-        scan(map, node);
+        terminate(map::containsKey).scan(map::putIfAbsent, node);
+        return map;
+    }
+
+    default Map<T, ArraySeq<T>> toDAG(Seq<T> nodes) {
+        Map<T, ArraySeq<T>> map = new HashMap<>();
+        SeqExpand<T> expand = terminate(map::containsKey);
+        nodes.consume(t -> expand.scan(map::putIfAbsent, t));
         return map;
     }
 
